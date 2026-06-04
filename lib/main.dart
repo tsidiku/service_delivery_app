@@ -322,6 +322,7 @@ class _MainShellState extends State<MainShell> {
   StreamSubscription<List<ServiceOrder>>? _ordersSubscription;
   int _selectedIndex = 0;
   Timer? _trackingTimer;
+  Timer? _uiRefreshTimer;
 
   @override
   void initState() {
@@ -339,6 +340,11 @@ class _MainShellState extends State<MainShell> {
         _orders = List<ServiceOrder>.from(orders);
       });
     });
+    // UI refresh timer to pick up changes in unauthorized proof set
+    _uiRefreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (!mounted) return;
+      setState(() {});
+    });
   }
 
   @override
@@ -346,6 +352,7 @@ class _MainShellState extends State<MainShell> {
     _trackingTimer?.cancel();
     _ordersSubscription?.cancel();
     _orderSyncService.dispose();
+    _uiRefreshTimer?.cancel();
     try {
       _database.close();
     } catch (_) {}
@@ -359,7 +366,6 @@ class _MainShellState extends State<MainShell> {
     );
     setState(() {
       _currentUser = match;
-      _selectedIndex = 0;
     });
   }
 
@@ -700,7 +706,7 @@ class _MainShellState extends State<MainShell> {
 
   Future<void> _uploadProof(String orderId) async {
     try {
-      final result = await FilePicker.platform.pickFiles(
+      final result = await FilePicker.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['jpg', 'jpeg', 'png', 'pdf'],
         allowMultiple: false,
@@ -844,7 +850,49 @@ class _MainShellState extends State<MainShell> {
     }
 
     return Scaffold(
-      body: SafeArea(child: _pages[_selectedIndex]),
+      body: SafeArea(
+        child: Column(
+          children: [
+            if (_syncService.unauthorizedProofs.isNotEmpty)
+              Container(
+                color: Colors.amber[100],
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${_syncService.unauthorizedProofs.length} proof upload(s) failed due to storage permissions.\nCheck your Supabase storage/RLS settings.',
+                        style: const TextStyle(color: Colors.black87),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () async {
+                        try {
+                          await _syncService.syncProofsToCloud();
+                          setState(() {});
+                        } catch (e) {
+                          debugPrint('Retry proofs failed: $e');
+                        }
+                      },
+                      child: const Text('Retry'),
+                    ),
+                    TextButton(
+                      onPressed: () {
+                        _syncService.clearUnauthorizedProofs();
+                        setState(() {});
+                      },
+                      child: const Text('Dismiss'),
+                    ),
+                  ],
+                ),
+              ),
+            Expanded(child: _pages[_selectedIndex]),
+          ],
+        ),
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _selectedIndex,
         onDestinationSelected: _selectIndex,
@@ -884,7 +932,9 @@ class AuthScreen extends StatefulWidget {
 }
 
 class _AuthScreenState extends State<AuthScreen> {
+  final _formKey = GlobalKey<FormState>();
   bool _isRegister = false;
+  bool _obscurePassword = true;
   final _nameController = TextEditingController();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
@@ -903,20 +953,16 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 
   Future<void> _submit() async {
+    if (!_formKey.currentState!.validate()) {
+      return;
+    }
+
     final email = _emailController.text.trim();
     final password = _passwordController.text.trim();
     if (_isRegister) {
       final name = _nameController.text.trim();
       final address = _addressController.text.trim();
       final phone = _phoneController.text.trim();
-      if (name.isEmpty ||
-          email.isEmpty ||
-          password.isEmpty ||
-          address.isEmpty ||
-          phone.isEmpty) {
-        _showError('Please fill in all fields.');
-        return;
-      }
       try {
         await widget.onRegister(name, email, password, _role, address, phone);
       } catch (e) {
@@ -925,10 +971,6 @@ class _AuthScreenState extends State<AuthScreen> {
       return;
     }
 
-    if (email.isEmpty || password.isEmpty) {
-      _showError('Please enter email and password.');
-      return;
-    }
     try {
       widget.onLogin(email, password);
     } catch (e) {
@@ -942,115 +984,242 @@ class _AuthScreenState extends State<AuthScreen> {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  InputDecoration _buildInputDecoration({
+    required String label,
+    required String hint,
+    required IconData icon,
+    Widget? suffix,
+  }) {
+    return InputDecoration(
+      labelText: label,
+      hintText: hint,
+      prefixIcon: Icon(icon),
+      suffixIcon: suffix,
+      filled: true,
+      fillColor: Colors.grey[50],
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: BorderSide.none,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Center(
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Card(
-          elevation: 6,
+          elevation: 8,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
           child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  _isRegister ? 'Create Profile' : 'Sign in',
-                  style: const TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.w700,
+            padding: const EdgeInsets.all(24),
+            child: Form(
+              key: _formKey,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _isRegister ? 'Create Profile' : 'Sign in',
+                    style: const TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 16),
-                if (_isRegister)
-                  TextField(
-                    controller: _nameController,
-                    decoration: const InputDecoration(labelText: 'Name'),
+                  const SizedBox(height: 8),
+                  Text(
+                    _isRegister
+                        ? 'Create your profile to request or fulfill deliveries.'
+                        : 'Welcome back! Sign in to continue your delivery session.',
+                    style: const TextStyle(fontSize: 14, color: Colors.black54),
+                    textAlign: TextAlign.center,
                   ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _emailController,
-                  decoration: const InputDecoration(labelText: 'Email'),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _passwordController,
-                  obscureText: true,
-                  decoration: const InputDecoration(labelText: 'Password'),
-                ),
-                if (_isRegister) ...[
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _addressController,
-                    decoration: const InputDecoration(labelText: 'Address'),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _phoneController,
-                    decoration: const InputDecoration(labelText: 'Phone'),
-                    keyboardType: TextInputType.phone,
-                  ),
-                  RadioGroup<UserRole>(
-                    groupValue: _role,
-                    onChanged: (UserRole? selected) {
-                      if (selected != null) {
-                        setState(() => _role = selected);
+                  const SizedBox(height: 24),
+                  if (_isRegister)
+                    TextFormField(
+                      controller: _nameController,
+                      textInputAction: TextInputAction.next,
+                      decoration: _buildInputDecoration(
+                        label: 'Full name',
+                        hint: 'Jane Doe',
+                        icon: Icons.person,
+                      ),
+                      validator: (value) {
+                        if (value == null || value.trim().isEmpty) {
+                          return 'Name is required';
+                        }
+                        return null;
+                      },
+                    ),
+                  if (_isRegister) const SizedBox(height: 16),
+                  TextFormField(
+                    controller: _emailController,
+                    keyboardType: TextInputType.emailAddress,
+                    textInputAction: TextInputAction.next,
+                    autofillHints: const [AutofillHints.email],
+                    decoration: _buildInputDecoration(
+                      label: 'Email',
+                      hint: 'you@example.com',
+                      icon: Icons.email,
+                    ),
+                    validator: (value) {
+                      if (value == null || value.trim().isEmpty) {
+                        return 'Email is required';
                       }
+                      if (!value.contains('@')) {
+                        return 'Enter a valid email';
+                      }
+                      return null;
                     },
-                    child: Column(
-                      children: [
-                        ListTile(
-                          title: const Text('Customer'),
-                          leading: const Radio<UserRole>(
-                            value: UserRole.customer,
-                          ),
-                          onTap: () =>
-                              setState(() => _role = UserRole.customer),
+                  ),
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    controller: _passwordController,
+                    obscureText: _obscurePassword,
+                    textInputAction: _isRegister
+                        ? TextInputAction.next
+                        : TextInputAction.done,
+                    autofillHints: _isRegister
+                        ? const [AutofillHints.newPassword]
+                        : const [AutofillHints.password],
+                    decoration: _buildInputDecoration(
+                      label: 'Password',
+                      hint: '••••••••',
+                      icon: Icons.lock,
+                      suffix: IconButton(
+                        icon: Icon(
+                          _obscurePassword
+                              ? Icons.visibility_off
+                              : Icons.visibility,
+                          size: 20,
                         ),
-                        ListTile(
-                          title: const Text('Shopper'),
-                          leading: const Radio<UserRole>(
-                            value: UserRole.shopper,
+                        onPressed: () {
+                          setState(() {
+                            _obscurePassword = !_obscurePassword;
+                          });
+                        },
+                      ),
+                    ),
+                    validator: (value) {
+                      if (value == null || value.isEmpty) {
+                        return 'Password is required';
+                      }
+                      if (value.length < 6) {
+                        return 'Use at least 6 characters';
+                      }
+                      return null;
+                    },
+                  ),
+                  if (_isRegister) ...[
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: _addressController,
+                      textInputAction: TextInputAction.next,
+                      decoration: _buildInputDecoration(
+                        label: 'Delivery address',
+                        hint: '123 Main St, City',
+                        icon: Icons.location_on,
+                      ),
+                      validator: (value) {
+                        if (value == null || value.trim().isEmpty) {
+                          return 'Address is required';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: _phoneController,
+                      keyboardType: TextInputType.phone,
+                      textInputAction: TextInputAction.done,
+                      decoration: _buildInputDecoration(
+                        label: 'Phone',
+                        hint: '+1 555 123 4567',
+                        icon: Icons.phone,
+                      ),
+                      validator: (value) {
+                        if (value == null || value.trim().isEmpty) {
+                          return 'Phone number is required';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 20),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'I am a',
+                        style: TextStyle(fontSize: 14, color: Colors.black87),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ChoiceChip(
+                            label: const Text('Customer'),
+                            selected: _role == UserRole.customer,
+                            onSelected: (_) =>
+                                setState(() => _role = UserRole.customer),
                           ),
-                          onTap: () => setState(() => _role = UserRole.shopper),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: ChoiceChip(
+                            label: const Text('Shopper'),
+                            selected: _role == UserRole.shopper,
+                            onSelected: (_) =>
+                                setState(() => _role = UserRole.shopper),
+                          ),
                         ),
                       ],
                     ),
+                  ],
+                  const SizedBox(height: 28),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: _submit,
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      child: Text(_isRegister ? 'Register account' : 'Sign in'),
+                    ),
                   ),
+                  const SizedBox(height: 16),
+                  TextButton(
+                    onPressed: () => setState(() => _isRegister = !_isRegister),
+                    child: Text(
+                      _isRegister
+                          ? 'Already have an account? Sign in'
+                          : 'Create a profile',
+                    ),
+                  ),
+                  if (!_isRegister)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12),
+                      child: Text(
+                        'Try: alex@example.com / customer123 or maria@example.com / shopper123',
+                        style: const TextStyle(color: Colors.black54),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  if (_isRegister)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12),
+                      child: Text(
+                        'Enter a real address to enable location matching.',
+                        style: const TextStyle(color: Colors.black54),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
                 ],
-                const SizedBox(height: 20),
-                ElevatedButton(
-                  onPressed: _submit,
-                  child: Text(_isRegister ? 'Register' : 'Login'),
-                ),
-                const SizedBox(height: 16),
-                TextButton(
-                  onPressed: () => setState(() => _isRegister = !_isRegister),
-                  child: Text(
-                    _isRegister
-                        ? 'Already have an account? Sign in'
-                        : 'Create a profile',
-                  ),
-                ),
-                if (!_isRegister)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 12),
-                    child: Text(
-                      'Try: alex@example.com / customer123 or maria@example.com / shopper123',
-                      style: const TextStyle(color: Colors.black54),
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                if (_isRegister)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 12),
-                    child: Text(
-                      'Enter a real address to enable location matching.',
-                      style: const TextStyle(color: Colors.black54),
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-              ],
+              ),
             ),
           ),
         ),
@@ -1091,88 +1260,211 @@ class HomeScreen extends StatelessWidget {
     final activeOrders = orders
         .where((order) => order.status != OrderStatus.completed)
         .toList();
+
+    Widget buildOrderCard(ServiceOrder order) {
+      return Card(
+        elevation: 2,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          order.title,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Deliver to ${order.deliveryAddress}',
+                          style: const TextStyle(color: Colors.black54),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Items: ${order.items.length}',
+                          style: const TextStyle(color: Colors.black54),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Chip(
+                    label: Text(order.statusLabel),
+                    backgroundColor: order.status == OrderStatus.requested
+                        ? Colors.orange[100]
+                        : order.status == OrderStatus.inProgress
+                        ? Colors.yellow[100]
+                        : order.status == OrderStatus.inTransit
+                        ? Colors.green[100]
+                        : order.status == OrderStatus.delivered
+                        ? Colors.blue[100]
+                        : order.status == OrderStatus.completed
+                        ? Colors.green[50]
+                        : Colors.red[100],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => OrderSessionScreen(
+                              order: order,
+                              currentUser: currentUser,
+                              onSendMessage: onSendMessage,
+                              ordersStream: ordersStream,
+                              onAddItem: onAddItem,
+                              onUploadProof: onUploadProof,
+                              onStartTransit: onStartTransit,
+                              onConfirmDelivery: onConfirmDelivery,
+                              onDisputeDelivery: onDisputeDelivery,
+                            ),
+                          ),
+                        );
+                      },
+                      icon: const Icon(Icons.open_in_new),
+                      label: const Text('Open session'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  if (currentUser.role == UserRole.customer)
+                    IconButton(
+                      icon: const Icon(Icons.chat_bubble_outline),
+                      tooltip: 'Chat with shopper',
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => OrderSessionScreen(
+                              order: order,
+                              currentUser: currentUser,
+                              onSendMessage: onSendMessage,
+                              ordersStream: ordersStream,
+                              onAddItem: onAddItem,
+                              onUploadProof: onUploadProof,
+                              onStartTransit: onStartTransit,
+                              onConfirmDelivery: onConfirmDelivery,
+                              onDisputeDelivery: onDisputeDelivery,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Hello, ${currentUser.name}',
-            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            currentUser.role == UserRole.customer
-                ? 'Request a shopper for grocery and delivery'
-                : 'View your assigned orders',
-            style: const TextStyle(fontSize: 16),
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Hello, ${currentUser.name}',
+                      style: const TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      currentUser.role == UserRole.customer
+                          ? 'Request a shopper for grocery and delivery'
+                          : 'Manage your active shopper orders',
+                      style: const TextStyle(fontSize: 16),
+                    ),
+                  ],
+                ),
+              ),
+              if (currentUser.role == UserRole.customer)
+                ElevatedButton.icon(
+                  onPressed: onRequestNearest,
+                  icon: const Icon(Icons.local_shipping),
+                  label: const Text('Request shopper'),
+                ),
+            ],
           ),
           const SizedBox(height: 16),
           if (currentUser.role == UserRole.customer)
             Card(
-              elevation: 3,
+              elevation: 2,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
               child: ListTile(
                 leading: const Icon(
                   Icons.local_grocery_store,
                   color: Colors.blue,
                 ),
-                title: const Text('Find closest shopper'),
+                title: const Text('Find the nearest available shopper'),
                 subtitle: Text(currentUser.address),
-                trailing: ElevatedButton(
+                trailing: TextButton(
                   onPressed: onRequestNearest,
-                  child: const Text('Request'),
+                  child: const Text('Request now'),
                 ),
               ),
             ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 20),
           const Text(
             'Active orders',
             style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
           ),
-          const SizedBox(height: 12),
-          if (activeOrders.isEmpty) const Text('No active orders yet.'),
-          if (activeOrders.isNotEmpty)
-            Expanded(
-              child: ListView.builder(
-                itemCount: activeOrders.length,
-                itemBuilder: (context, index) {
-                  final order = activeOrders[index];
-                  return Card(
-                    child: ListTile(
-                      title: Text(order.title),
-                      subtitle: Text(
-                        'Deliver to ${order.deliveryAddress}\nStatus: ${order.statusLabel}${order.items.isNotEmpty ? '\nItems: ${order.items.length}' : ''}',
-                      ),
-                      isThreeLine: true,
-                      trailing: currentUser.role == UserRole.customer
-                          ? IconButton(
-                              icon: const Icon(Icons.chat_bubble_outline),
-                              tooltip: 'Open order session',
-                              onPressed: () {
-                                Navigator.of(context).push(
-                                  MaterialPageRoute(
-                                    builder: (_) => OrderSessionScreen(
-                                      order: order,
-                                      currentUser: currentUser,
-                                      onSendMessage: onSendMessage,
-                                      ordersStream: ordersStream,
-                                      onAddItem: onAddItem,
-                                      onUploadProof: onUploadProof,
-                                      onStartTransit: onStartTransit,
-                                      onConfirmDelivery: onConfirmDelivery,
-                                      onDisputeDelivery: onDisputeDelivery,
-                                    ),
-                                  ),
-                                );
-                              },
-                            )
-                          : null,
+          const SizedBox(height: 10),
+          Expanded(
+            child: activeOrders.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.inbox,
+                          size: 60,
+                          color: Colors.black26,
+                        ),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'No active orders yet.',
+                          style: TextStyle(fontSize: 16, color: Colors.black54),
+                        ),
+                        const SizedBox(height: 12),
+                        if (currentUser.role == UserRole.customer)
+                          ElevatedButton(
+                            onPressed: onRequestNearest,
+                            child: const Text('Request a shopper'),
+                          ),
+                      ],
                     ),
-                  );
-                },
-              ),
-            ),
-          if (activeOrders.isEmpty) const Spacer(),
+                  )
+                : ListView.separated(
+                    itemCount: activeOrders.length,
+                    separatorBuilder: (_, _) => const SizedBox(height: 12),
+                    itemBuilder: (context, index) {
+                      return buildOrderCard(activeOrders[index]);
+                    },
+                  ),
+          ),
         ],
       ),
     );
@@ -1227,42 +1519,48 @@ class JobsScreen extends StatelessWidget {
     final shopperOrders = activeOrders
         .where((o) => o.shopperId == currentUser.id)
         .toList();
-
     final requestedOrders = shopperOrders
         .where((order) => order.status == OrderStatus.requested)
         .toList();
 
-    return Column(
-      children: [
-        if (currentUser.role == UserRole.shopper && requestedOrders.isNotEmpty)
-          MaterialBanner(
-            leading: const Icon(
-              Icons.notifications_active,
-              color: Colors.white,
-            ),
-            backgroundColor: Colors.blue.shade700,
-            content: Text(
-              'You have ${requestedOrders.length} new requested order(s). Accept a shopper request to begin.',
-              style: const TextStyle(color: Colors.white),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () {},
-                child: const Text(
-                  'View orders',
-                  style: TextStyle(color: Colors.white),
-                ),
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (currentUser.role == UserRole.shopper &&
+              requestedOrders.isNotEmpty)
+            MaterialBanner(
+              leading: const Icon(
+                Icons.notifications_active,
+                color: Colors.white,
               ),
-            ],
-          ),
-        Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Row(
+              backgroundColor: Colors.blue.shade700,
+              content: Text(
+                'You have ${requestedOrders.length} request(s) waiting for acceptance.',
+                style: const TextStyle(color: Colors.white),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {},
+                  child: const Text(
+                    'View orders',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                ),
+              ],
+            ),
+          Row(
             children: [
-              const Expanded(
+              Expanded(
                 child: Text(
-                  'Shopper Network',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                  currentUser.role == UserRole.customer
+                      ? 'Shopper network'
+                      : 'Assigned orders',
+                  style: const TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
               Icon(
@@ -1272,238 +1570,194 @@ class JobsScreen extends StatelessWidget {
               ),
             ],
           ),
-        ),
-        Expanded(
-          child: ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              if (currentUser.role == UserRole.customer) ...[
-                const Text(
-                  'Available shoppers',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 12),
-                ...shoppers.map((shopper) {
-                  final distance = const Distance().as(
-                    LengthUnit.Kilometer,
-                    currentUser.location,
-                    shopper.location,
-                  );
-                  return Card(
-                    child: ListTile(
-                      leading: const Icon(Icons.person_pin_circle),
-                      title: Text(shopper.name),
-                      subtitle: Text(
-                        '${shopper.address} • ${distance.toStringAsFixed(1)} km',
-                      ),
-                      trailing: ElevatedButton(
-                        onPressed: () => onRequestShopper(shopper.id),
-                        child: const Text('Request'),
-                      ),
-                    ),
-                  );
-                }),
-              ] else ...[
-                // For shoppers: show only orders assigned to this shopper
-                if (shopperOrders.isNotEmpty) ...[
-                  const Text(
-                    'Assigned orders',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                  ),
-                  const SizedBox(height: 12),
-                  ...shopperOrders.map((order) {
-                    return Card(
-                      child: ListTile(
-                        leading: const Icon(Icons.delivery_dining),
-                        title: Text(order.title),
-                        subtitle: Text(
-                          'Deliver to ${order.deliveryAddress}\nStatus: ${order.statusLabel}${order.items.isNotEmpty ? '\nItems: ${order.items.length}' : ''}',
+          const SizedBox(height: 16),
+          Expanded(
+            child: currentUser.role == UserRole.customer
+                ? shoppers.isEmpty
+                      ? const Center(
+                          child: Text('No shoppers available at the moment.'),
+                        )
+                      : ListView.separated(
+                          padding: const EdgeInsets.only(bottom: 16),
+                          separatorBuilder: (_, _) =>
+                              const SizedBox(height: 12),
+                          itemCount: shoppers.length,
+                          itemBuilder: (context, index) {
+                            final shopper = shoppers[index];
+                            final distance = const Distance().as(
+                              LengthUnit.Kilometer,
+                              currentUser.location,
+                              shopper.location,
+                            );
+                            return Card(
+                              elevation: 2,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              child: ListTile(
+                                leading: const Icon(Icons.person_pin_circle),
+                                title: Text(shopper.name),
+                                subtitle: Text(
+                                  '${shopper.address} • ${distance.toStringAsFixed(1)} km away',
+                                ),
+                                trailing: ElevatedButton(
+                                  onPressed: () => onRequestShopper(shopper.id),
+                                  child: const Text('Request'),
+                                ),
+                              ),
+                            );
+                          },
+                        )
+                : shopperOrders.isEmpty
+                ? const Center(child: Text('No active assigned orders yet.'))
+                : ListView.separated(
+                    padding: const EdgeInsets.only(bottom: 16),
+                    separatorBuilder: (_, _) => const SizedBox(height: 12),
+                    itemCount: shopperOrders.length,
+                    itemBuilder: (context, index) {
+                      final order = shopperOrders[index];
+                      return Card(
+                        elevation: 2,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
                         ),
-                        isThreeLine: true,
-                        trailing: order.status == OrderStatus.requested
-                            ? Row(
-                                mainAxisSize: MainAxisSize.min,
+                        child: Padding(
+                          padding: const EdgeInsets.all(14.0),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  TextButton(
-                                    onPressed: () => onAccept(order.id),
-                                    child: const Text('Accept'),
-                                  ),
-                                  TextButton(
-                                    onPressed: () => onDecline(order.id),
-                                    child: const Text('Decline'),
-                                  ),
-                                ],
-                              )
-                            : order.status == OrderStatus.inProgress
-                            ? Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  TextButton(
-                                    onPressed: () {
-                                      Navigator.of(context).push(
-                                        MaterialPageRoute(
-                                          builder: (_) => OrderSessionScreen(
-                                            order: order,
-                                            currentUser: currentUser,
-                                            onSendMessage: onSendMessage,
-                                            ordersStream: ordersStream,
-                                            onAddItem: onAddItem,
-                                            onUploadProof: onUploadProof,
-                                            onStartTransit: onStartTransit,
-                                            onConfirmDelivery:
-                                                onConfirmDelivery,
-                                            onDisputeDelivery:
-                                                onDisputeDelivery,
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          order.title,
+                                          style: const TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.w700,
                                           ),
                                         ),
-                                      );
-                                    },
-                                    child: const Text('View order'),
-                                  ),
-                                  TextButton(
-                                    onPressed: () => onStartTransit(order.id),
-                                    child: const Text('Start transit'),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(Icons.chat),
-                                    onPressed: () {
-                                      Navigator.of(context).push(
-                                        MaterialPageRoute(
-                                          builder: (_) => OrderSessionScreen(
-                                            order: order,
-                                            currentUser: currentUser,
-                                            onSendMessage: onSendMessage,
-                                            ordersStream: ordersStream,
-                                            onAddItem: onAddItem,
-                                            onUploadProof: onUploadProof,
-                                            onStartTransit: onStartTransit,
-                                            onConfirmDelivery:
-                                                onConfirmDelivery,
-                                            onDisputeDelivery:
-                                                onDisputeDelivery,
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          'Deliver to ${order.deliveryAddress}',
+                                          style: const TextStyle(
+                                            color: Colors.black54,
                                           ),
                                         ),
-                                      );
-                                    },
-                                  ),
-                                ],
-                              )
-                            : order.status == OrderStatus.inTransit
-                            ? Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  TextButton(
-                                    onPressed: () {
-                                      Navigator.of(context).push(
-                                        MaterialPageRoute(
-                                          builder: (_) => OrderSessionScreen(
-                                            order: order,
-                                            currentUser: currentUser,
-                                            onSendMessage: onSendMessage,
-                                            ordersStream: ordersStream,
-                                            onAddItem: onAddItem,
-                                            onUploadProof: onUploadProof,
-                                            onStartTransit: onStartTransit,
-                                            onConfirmDelivery:
-                                                onConfirmDelivery,
-                                            onDisputeDelivery:
-                                                onDisputeDelivery,
+                                        const SizedBox(height: 8),
+                                        Text(
+                                          'Items: ${order.items.length} • ${order.statusLabel}',
+                                          style: const TextStyle(
+                                            color: Colors.black54,
                                           ),
                                         ),
-                                      );
-                                    },
-                                    child: const Text('View order'),
+                                      ],
+                                    ),
                                   ),
-                                  TextButton(
-                                    onPressed: () => onMarkDelivered(order.id),
-                                    child: const Text('Mark delivered'),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(Icons.chat),
-                                    onPressed: () {
-                                      Navigator.of(context).push(
-                                        MaterialPageRoute(
-                                          builder: (_) => OrderSessionScreen(
-                                            order: order,
-                                            currentUser: currentUser,
-                                            onSendMessage: onSendMessage,
-                                            ordersStream: ordersStream,
-                                            onAddItem: onAddItem,
-                                            onUploadProof: onUploadProof,
-                                            onStartTransit: onStartTransit,
-                                            onConfirmDelivery:
-                                                onConfirmDelivery,
-                                            onDisputeDelivery:
-                                                onDisputeDelivery,
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                ],
-                              )
-                            : Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  TextButton(
-                                    onPressed: () {
-                                      Navigator.of(context).push(
-                                        MaterialPageRoute(
-                                          builder: (_) => OrderSessionScreen(
-                                            order: order,
-                                            currentUser: currentUser,
-                                            onSendMessage: onSendMessage,
-                                            ordersStream: ordersStream,
-                                            onAddItem: onAddItem,
-                                            onUploadProof: onUploadProof,
-                                            onStartTransit: onStartTransit,
-                                            onConfirmDelivery:
-                                                onConfirmDelivery,
-                                            onDisputeDelivery:
-                                                onDisputeDelivery,
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                    child: const Text('View order'),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(Icons.chat),
-                                    onPressed: () {
-                                      Navigator.of(context).push(
-                                        MaterialPageRoute(
-                                          builder: (_) => OrderSessionScreen(
-                                            order: order,
-                                            currentUser: currentUser,
-                                            onSendMessage: onSendMessage,
-                                            ordersStream: ordersStream,
-                                            onAddItem: onAddItem,
-                                            onUploadProof: onUploadProof,
-                                            onStartTransit: onStartTransit,
-                                            onConfirmDelivery:
-                                                onConfirmDelivery,
-                                            onDisputeDelivery:
-                                                onDisputeDelivery,
-                                          ),
-                                        ),
-                                      );
-                                    },
+                                  Chip(
+                                    label: Text(order.statusLabel),
+                                    backgroundColor:
+                                        order.status == OrderStatus.requested
+                                        ? Colors.orange[100]
+                                        : order.status == OrderStatus.inProgress
+                                        ? Colors.yellow[100]
+                                        : order.status == OrderStatus.inTransit
+                                        ? Colors.green[100]
+                                        : order.status == OrderStatus.delivered
+                                        ? Colors.blue[100]
+                                        : order.status == OrderStatus.completed
+                                        ? Colors.green[50]
+                                        : Colors.red[100],
                                   ),
                                 ],
                               ),
-                      ),
-                    );
-                  }),
-                ] else
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 24),
-                    child: Text('No assigned orders yet.'),
+                              const SizedBox(height: 12),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  ElevatedButton.icon(
+                                    onPressed: () {
+                                      Navigator.of(context).push(
+                                        MaterialPageRoute(
+                                          builder: (_) => OrderSessionScreen(
+                                            order: order,
+                                            currentUser: currentUser,
+                                            onSendMessage: onSendMessage,
+                                            ordersStream: ordersStream,
+                                            onAddItem: onAddItem,
+                                            onUploadProof: onUploadProof,
+                                            onStartTransit: onStartTransit,
+                                            onConfirmDelivery:
+                                                onConfirmDelivery,
+                                            onDisputeDelivery:
+                                                onDisputeDelivery,
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                    icon: const Icon(Icons.open_in_new),
+                                    label: const Text('Open'),
+                                  ),
+                                  ElevatedButton.icon(
+                                    onPressed: () {
+                                      Navigator.of(context).push(
+                                        MaterialPageRoute(
+                                          builder: (_) => OrderSessionScreen(
+                                            order: order,
+                                            currentUser: currentUser,
+                                            onSendMessage: onSendMessage,
+                                            ordersStream: ordersStream,
+                                            onAddItem: onAddItem,
+                                            onUploadProof: onUploadProof,
+                                            onStartTransit: onStartTransit,
+                                            onConfirmDelivery:
+                                                onConfirmDelivery,
+                                            onDisputeDelivery:
+                                                onDisputeDelivery,
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                    icon: const Icon(Icons.chat_bubble_outline),
+                                    label: const Text('Chat'),
+                                  ),
+                                  if (order.status == OrderStatus.requested)
+                                    ElevatedButton(
+                                      onPressed: () => onAccept(order.id),
+                                      child: const Text('Accept'),
+                                    ),
+                                  if (order.status == OrderStatus.requested)
+                                    OutlinedButton(
+                                      onPressed: () => onDecline(order.id),
+                                      child: const Text('Decline'),
+                                    ),
+                                  if (order.status == OrderStatus.inProgress)
+                                    ElevatedButton(
+                                      onPressed: () => onStartTransit(order.id),
+                                      child: const Text('Start transit'),
+                                    ),
+                                  if (order.status == OrderStatus.inTransit)
+                                    ElevatedButton(
+                                      onPressed: () =>
+                                          onMarkDelivered(order.id),
+                                      child: const Text('Mark delivered'),
+                                    ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
                   ),
-              ],
-            ],
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -1663,8 +1917,36 @@ class _OrderSessionScreenState extends State<OrderSessionScreen> {
                       ),
                     ),
                     const SizedBox(height: 8),
-                    Text('Pickup: ${order.pickupAddress}'),
-                    Text('Drop-off: ${order.deliveryAddress}'),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('Pickup: ${order.pickupAddress}'),
+                              const SizedBox(height: 4),
+                              Text('Drop-off: ${order.deliveryAddress}'),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.blue[50],
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Text(
+                            'Order overview',
+                            style: TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                      ],
+                    ),
                     const SizedBox(height: 12),
                     Wrap(
                       spacing: 10,
@@ -1680,6 +1962,11 @@ class _OrderSessionScreenState extends State<OrderSessionScreen> {
                         ),
                       ],
                     ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Order details are shown here so you can track pickup, delivery, and status at a glance.',
+                      style: TextStyle(color: Colors.black54),
+                    ),
                   ],
                 ),
               ),
@@ -1688,63 +1975,118 @@ class _OrderSessionScreenState extends State<OrderSessionScreen> {
             Card(
               elevation: 2,
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
+                borderRadius: BorderRadius.circular(14),
               ),
               child: Padding(
-                padding: const EdgeInsets.all(16.0),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12.0,
+                  vertical: 10.0,
+                ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const Text(
-                      'Delivery proof',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    if (order.proofFiles.isEmpty)
-                      const Text(
-                        'No delivery proof uploaded yet. Shoppers can upload receipts or proof documents here.',
-                        style: TextStyle(color: Colors.black54),
-                      )
-                    else ...[
-                      ...order.proofFiles.map((path) {
-                        final fileName = path.split(RegExp(r'[\\/]')).last;
-                        return ListTile(
-                          leading: const Icon(Icons.insert_drive_file),
-                          title: Text(fileName),
-                          subtitle: Text(path),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.open_in_new),
-                            onPressed: () => _viewProofFile(path),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: const [
+                        Text(
+                          'Delivery proof',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
                           ),
-                          onTap: () => _viewProofFile(path),
-                        );
-                      }),
-                    ],
-                    const SizedBox(height: 12),
-                    if (widget.currentUser.role == UserRole.shopper &&
-                        order.status == OrderStatus.inProgress)
-                      ElevatedButton.icon(
-                        onPressed: () async {
-                          widget.onStartTransit(order.id);
-                          setState(() {});
+                        ),
+                        Icon(Icons.insert_drive_file, size: 20),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    if (order.proofFiles.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 6.0),
+                        child: Text(
+                          'No proof uploaded yet. Shoppers can attach receipts or delivery evidence here.',
+                          style: TextStyle(color: Colors.black54, fontSize: 13),
+                        ),
+                      )
+                    else
+                      ListView.separated(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        itemCount: order.proofFiles.length,
+                        separatorBuilder: (_, _) =>
+                            const Divider(height: 1, thickness: 1, indent: 34),
+                        itemBuilder: (context, index) {
+                          final path = order.proofFiles[index];
+                          final fileName = path.split(RegExp(r'[\\/]')).last;
+                          return ListTile(
+                            dense: true,
+                            minLeadingWidth: 24,
+                            horizontalTitleGap: 10,
+                            visualDensity: VisualDensity.compact,
+                            contentPadding: EdgeInsets.zero,
+                            leading: const Icon(Icons.attach_file, size: 20),
+                            title: Text(
+                              fileName,
+                              style: const TextStyle(fontSize: 14),
+                            ),
+                            subtitle: Text(
+                              path,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                            trailing: IconButton(
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(),
+                              icon: const Icon(Icons.open_in_new, size: 20),
+                              onPressed: () => _viewProofFile(path),
+                            ),
+                            onTap: () => _viewProofFile(path),
+                          );
                         },
-                        icon: const Icon(Icons.local_shipping),
-                        label: const Text('Start transit'),
                       ),
-                    if (widget.currentUser.role == UserRole.shopper &&
-                        (order.status == OrderStatus.inTransit ||
-                            order.status == OrderStatus.delivered))
-                      ElevatedButton.icon(
-                        onPressed: () async {
-                          await widget.onUploadProof(order.id);
-                          setState(() {});
-                        },
-                        icon: const Icon(Icons.upload_file),
-                        label: const Text('Upload delivery proof'),
-                      ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 6,
+                      children: [
+                        if (widget.currentUser.role == UserRole.shopper &&
+                            order.status == OrderStatus.inProgress)
+                          ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              minimumSize: const Size(0, 36),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 10,
+                              ),
+                            ),
+                            onPressed: () async {
+                              widget.onStartTransit(order.id);
+                              setState(() {});
+                            },
+                            icon: const Icon(Icons.local_shipping, size: 18),
+                            label: const Text('Start transit'),
+                          ),
+                        if (widget.currentUser.role == UserRole.shopper &&
+                            (order.status == OrderStatus.inTransit ||
+                                order.status == OrderStatus.delivered))
+                          ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              minimumSize: const Size(0, 36),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 10,
+                              ),
+                            ),
+                            onPressed: () async {
+                              await widget.onUploadProof(order.id);
+                              setState(() {});
+                            },
+                            icon: const Icon(Icons.upload_file, size: 18),
+                            label: const Text('Upload proof'),
+                          ),
+                      ],
+                    ),
                     if (widget.currentUser.role == UserRole.customer &&
                         order.status == OrderStatus.delivered)
                       Column(
@@ -1780,14 +2122,14 @@ class _OrderSessionScreenState extends State<OrderSessionScreen> {
                                   widget.onConfirmDelivery(order.id, _rating);
                                   setState(() {});
                                 },
-                                child: const Text('Confirm delivery'),
+                                child: const Text('Confirm'),
                               ),
                             ],
                           ),
                           const SizedBox(height: 8),
-                          ElevatedButton(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.red[600],
+                          TextButton(
+                            style: TextButton.styleFrom(
+                              foregroundColor: Colors.red[700],
                             ),
                             onPressed: () {
                               showDialog<void>(
@@ -1821,7 +2163,7 @@ class _OrderSessionScreenState extends State<OrderSessionScreen> {
                                           Navigator.of(context).pop();
                                           setState(() {});
                                         },
-                                        child: const Text('Submit dispute'),
+                                        child: const Text('Submit'),
                                       ),
                                     ],
                                   );
@@ -1833,25 +2175,25 @@ class _OrderSessionScreenState extends State<OrderSessionScreen> {
                         ],
                       ),
                     if (order.status == OrderStatus.completed)
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          const Padding(
-                            padding: EdgeInsets.only(top: 12),
-                            child: Text(
+                      Padding(
+                        padding: const EdgeInsets.only(top: 12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            const Text(
                               'Delivery confirmed. Thank you for using the service.',
                               style: TextStyle(color: Colors.green),
                             ),
-                          ),
-                          if (order.shopperRating != null)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 8.0),
-                              child: Text(
-                                'Shopper rating: ${order.shopperRating!.toStringAsFixed(0)}/5',
-                                style: const TextStyle(color: Colors.black87),
+                            if (order.shopperRating != null)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 8.0),
+                                child: Text(
+                                  'Shopper rating: ${order.shopperRating!.toStringAsFixed(0)}/5',
+                                  style: const TextStyle(color: Colors.black87),
+                                ),
                               ),
-                            ),
-                        ],
+                          ],
+                        ),
                       ),
                     if (order.status == OrderStatus.disputed)
                       Padding(
@@ -1975,22 +2317,26 @@ class _OrderSessionScreenState extends State<OrderSessionScreen> {
                                 fontWeight: FontWeight.w700,
                               ),
                             ),
-                            const SizedBox(height: 12),
+                            const SizedBox(height: 10),
                             if (order.status == OrderStatus.requested)
                               Container(
-                                padding: const EdgeInsets.all(12),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 10,
+                                ),
                                 decoration: BoxDecoration(
                                   color: Colors.yellow[100],
                                   borderRadius: BorderRadius.circular(12),
                                 ),
                                 child: const Text(
                                   'The shopper has not accepted the request yet. Chat starts once the shopper accepts.',
-                                  style: TextStyle(color: Colors.black87),
+                                  style: TextStyle(
+                                    color: Colors.black87,
+                                    fontSize: 13,
+                                  ),
                                 ),
-                              )
-                            else
-                              const SizedBox.shrink(),
-                            const SizedBox(height: 12),
+                              ),
+                            const SizedBox(height: 10),
                             Expanded(
                               child: order.messages.isEmpty
                                   ? Center(
@@ -2017,15 +2363,19 @@ class _OrderSessionScreenState extends State<OrderSessionScreen> {
                                               : Alignment.centerLeft,
                                           child: Container(
                                             margin: const EdgeInsets.symmetric(
-                                              vertical: 6,
+                                              vertical: 4,
+                                              horizontal: 2,
                                             ),
-                                            padding: const EdgeInsets.all(12),
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 12,
+                                              vertical: 10,
+                                            ),
                                             decoration: BoxDecoration(
                                               color: isMe
                                                   ? Colors.blue[100]
                                                   : Colors.grey[200],
                                               borderRadius:
-                                                  BorderRadius.circular(12),
+                                                  BorderRadius.circular(14),
                                             ),
                                             child: Column(
                                               crossAxisAlignment: isMe
@@ -2038,7 +2388,7 @@ class _OrderSessionScreenState extends State<OrderSessionScreen> {
                                                     fontSize: 14,
                                                   ),
                                                 ),
-                                                const SizedBox(height: 6),
+                                                const SizedBox(height: 4),
                                                 Text(
                                                   '${(message['sender'] ?? '') == order.customerId ? 'Customer' : 'Shopper'} • ${(message['time'] ?? '').length >= 16 ? (message['time'] ?? '').substring(11, 16) : (message['time'] ?? '')}',
                                                   style: const TextStyle(
@@ -2053,27 +2403,23 @@ class _OrderSessionScreenState extends State<OrderSessionScreen> {
                                       },
                                     ),
                             ),
-                            const Divider(),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: TextField(
-                                    controller: _msgController,
-                                    readOnly:
-                                        order.status == OrderStatus.requested,
-                                    decoration: InputDecoration(
-                                      hintText:
-                                          order.status == OrderStatus.requested
-                                          ? 'Chat opens after shopper accepts'
-                                          : 'Message $roleLabel',
-                                      border: OutlineInputBorder(
-                                        borderRadius: BorderRadius.circular(12),
-                                      ),
-                                    ),
-                                  ),
+                            const Divider(height: 1),
+                            const SizedBox(height: 8),
+                            TextField(
+                              controller: _msgController,
+                              readOnly: order.status == OrderStatus.requested,
+                              decoration: InputDecoration(
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 12,
                                 ),
-                                const SizedBox(width: 8),
-                                ElevatedButton(
+                                hintText: order.status == OrderStatus.requested
+                                    ? 'Chat opens after shopper accepts'
+                                    : 'Message $roleLabel',
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                suffixIcon: IconButton(
                                   onPressed:
                                       order.status == OrderStatus.requested ||
                                           _isSendingMessage
@@ -2100,18 +2446,17 @@ class _OrderSessionScreenState extends State<OrderSessionScreen> {
                                             }
                                           }
                                         },
-                                  child: _isSendingMessage
+                                  icon: _isSendingMessage
                                       ? const SizedBox(
                                           width: 18,
                                           height: 18,
                                           child: CircularProgressIndicator(
                                             strokeWidth: 2,
-                                            color: Colors.white,
                                           ),
                                         )
                                       : const Icon(Icons.send),
                                 ),
-                              ],
+                              ),
                             ),
                           ],
                         ),
@@ -2406,6 +2751,9 @@ class _MapScreenState extends State<MapScreen> {
                 urlTemplate:
                     'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
                 subdomains: const ['a', 'b', 'c'],
+                tileProvider: NetworkTileProvider(
+                  headers: {'User-Agent': 'service-delivery-app/1.0'},
+                ),
               ),
               MarkerLayer(
                 markers: [
@@ -2553,6 +2901,21 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ),
             ),
+          Positioned(
+            bottom: 16,
+            left: 16,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: const Color.fromRGBO(255, 255, 255, 0.85),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Text(
+                '© OpenStreetMap contributors',
+                style: TextStyle(fontSize: 11, color: Colors.black54),
+              ),
+            ),
+          ),
           if (activeOrder != null)
             Positioned(
               bottom: 24,

@@ -173,10 +173,10 @@ packages:
     dependency: transitive
     description:
       name: code_assets
-      sha256: dad6bf6b9f4f378b0a69edbf42584d336efd1a9ce15deb1ba591cbb1b5ff440f
+      sha256: bf394f466ba9205f1812a0433b392d6af280f155f56651eda7c18cc32ed493b8
       url: "https://pub.dev"
     source: hosted
-    version: "1.1.0"
+    version: "1.2.1"
   collection:
     dependency: transitive
     description:
@@ -193,6 +193,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.1.2"
+  cross_file:
+    dependency: transitive
+    description:
+      name: cross_file
+      sha256: "28bb3ae56f117b5aec029d702a90f57d285cd975c3c5c281eaca38dbc47c5937"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.3.5+2"
   crypto:
     dependency: transitive
     description:
@@ -293,10 +301,10 @@ packages:
     dependency: "direct main"
     description:
       name: file_picker
-      sha256: be325344c1f3070354a1d84a231a1ba75ea85d413774ec4bdf444c023342e030
+      sha256: f13a03000d942e476bc1ff0a736d2e9de711d2f89a95cd4c1d88f861c3348387
       url: "https://pub.dev"
     source: hosted
-    version: "5.5.0"
+    version: "11.0.2"
   fixnum:
     dependency: transitive
     description:
@@ -321,10 +329,11 @@ packages:
   flutter_map:
     dependency: "direct main"
     description:
-      name: flutter_map
-      sha256: "03b71c02806ff20c3718d108cbbb3638142ebafe368d8ce2dd22a33344bcb02b"
-      url: "https://pub.dev"
-    source: hosted
+      path: "."
+      ref: master
+      resolved-ref: f614459cd2893a77b9ed9a4c234305c78277020d
+      url: "https://github.com/fleaflet/flutter_map.git"
+    source: git
     version: "8.3.0"
   flutter_plugin_android_lifecycle:
     dependency: transitive
@@ -492,10 +501,10 @@ packages:
     dependency: transitive
     description:
       name: hooks
-      sha256: a41af4e8fc687cd6d33de9751eb936c8c0204ebe2bcb6c15ecf707504bf47f31
+      sha256: "62ae9bb76d02526c7c2110a19b6e6ad788fe28d35e553e35efb02a41a46ab43a"
       url: "https://pub.dev"
     source: hosted
-    version: "2.0.0"
+    version: "2.0.1"
   http:
     dependency: "direct main"
     description:
@@ -572,10 +581,10 @@ packages:
     dependency: "direct main"
     description:
       name: latlong2
-      sha256: "98227922caf49e6056f91b6c56945ea1c7b166f28ffcd5fb8e72fc0b453cc8fe"
+      sha256: "84b776b100a84a684a0aaa3fa4dc2c9b1931c658de533701ee4e09bfa991f8dc"
       url: "https://pub.dev"
     source: hosted
-    version: "0.9.1"
+    version: "0.10.1"
   leak_tracker:
     dependency: transitive
     description:
@@ -660,10 +669,10 @@ packages:
     dependency: transitive
     description:
       name: native_toolchain_c
-      sha256: "49c147aa4a5905ec12028e2b7bfe360eace6cb91fe4cf08a3fe76e309592acae"
+      sha256: f59351d28f49520cd3a74eb1f41c5f19ae15e53c65a3231d14af672e46510a96
       url: "https://pub.dev"
     source: hosted
-    version: "0.19.0"
+    version: "0.19.1"
   objective_c:
     dependency: transitive
     description:
@@ -985,10 +994,10 @@ packages:
     dependency: "direct main"
     description:
       name: sqlite3_flutter_libs
-      sha256: eeb9e3a45207649076b808f8a5a74d68770d0b7f26ccef6d5f43106eee5375ad
+      sha256: "3ed7553eee7bb368f8950f58ba29f634e06e813c029aff6a0d60862b96de8454"
       url: "https://pub.dev"
     source: hosted
-    version: "0.5.42"
+    version: "0.6.0+eol"
   sqlparser:
     dependency: transitive
     description:

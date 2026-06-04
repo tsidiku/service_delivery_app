@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:drift/drift.dart' as drift;
@@ -13,16 +14,23 @@ import 'database.dart';
 // with your real project values before enabling real cloud sync.
 const String _supabaseUrl = String.fromEnvironment(
   'SUPABASE_URL',
-  defaultValue: 'https://your-project.supabase.co',
+  defaultValue: 'https://nukurjltgczkkdzholff.supabase.co',
 );
 const String _supabaseAnonKey = String.fromEnvironment(
   'SUPABASE_ANON_KEY',
-  defaultValue: 'your-anon-key',
+  defaultValue: 'sb_publishable_rrbjK7a3LjAxE1EAjUxHRQ_NvHuIQuz',
 );
 
 class SupabaseSyncService {
   final ServiceDeliveryDatabase db;
   late final SupabaseClient supabase;
+  final Set<String> _unauthorizedProofs = <String>{};
+
+  /// Returns a copy of unauthorized proof file names (403/RLS) detected during uploads
+  List<String> get unauthorizedProofs => List.unmodifiable(_unauthorizedProofs);
+
+  /// Clear tracked unauthorized proof file names (user dismissed)
+  void clearUnauthorizedProofs() => _unauthorizedProofs.clear();
 
   SupabaseSyncService(this.db);
 
@@ -98,12 +106,25 @@ class SupabaseSyncService {
     }
   }
 
-  /// Sync messages from Supabase
+  /// Sync messages from Supabase for orders that already exist locally.
   Future<void> syncMessagesFromCloud() async {
     try {
+      final localOrders = await db.getAllOrders();
+      final orderIds = localOrders.map((order) => order.id).toList();
+
+      if (orderIds.isEmpty) {
+        debugPrint('No local orders found; skipping remote message sync.');
+        return;
+      }
+
       final response = await supabase
           .from('order_messages')
           .select()
+          .filter(
+            'order_id',
+            'in',
+            "(${orderIds.map((id) => "'$id'").join(',')})",
+          )
           .order('created_at', ascending: true);
 
       for (final raw in response) {
@@ -144,6 +165,7 @@ class SupabaseSyncService {
 
   /// Sync proof files to Supabase storage
   Future<void> syncProofsToCloud() async {
+    const maxUploadAttempts = 3;
     try {
       final unsyncedProofs = await db
           .select(db.proofFiles)
@@ -151,12 +173,19 @@ class SupabaseSyncService {
           .then((proofs) => proofs.where((p) => !p.isSynced).toList());
 
       for (final proof in unsyncedProofs) {
-        try {
-          final file = File(proof.filePath);
-          if (await file.exists()) {
-            final bytes = await file.readAsBytes();
-            final storagePath = 'proofs/${proof.orderId}/${proof.fileName}';
+        final file = File(proof.filePath);
+        if (!await file.exists()) {
+          debugPrint('Proof file missing, skipping upload: ${proof.filePath}');
+          continue;
+        }
 
+        final bytes = await file.readAsBytes();
+        final storagePath = 'proofs/${proof.orderId}/${proof.fileName}';
+        var attempt = 0;
+
+        while (attempt < maxUploadAttempts) {
+          attempt += 1;
+          try {
             await supabase.storage
                 .from('order-proofs')
                 .uploadBinary(
@@ -165,11 +194,38 @@ class SupabaseSyncService {
                   fileOptions: const FileOptions(upsert: true),
                 );
 
-            // Mark proof as synced
             await db.markProofSynced(proof.id);
+            break;
+          } catch (e) {
+            final statusCode = e is StorageException
+                ? e.statusCode?.toString()
+                : null;
+            final isUnauthorized = statusCode == '401' || statusCode == '403';
+            final isTransient = e is SocketException || e is TimeoutException;
+
+            if (isUnauthorized) {
+              if (!_unauthorizedProofs.contains(proof.fileName)) {
+                debugPrint(
+                  'Unauthorized uploading proof ${proof.fileName}: ${e.toString()}. '
+                  'Check Supabase storage policy / RLS permissions.',
+                );
+                _unauthorizedProofs.add(proof.fileName);
+              }
+              break;
+            }
+
+            if (attempt >= maxUploadAttempts || !isTransient) {
+              debugPrint(
+                'Failed syncing proof ${proof.fileName} after $attempt attempt(s): $e',
+              );
+              break;
+            }
+
+            debugPrint(
+              'Transient error uploading proof ${proof.fileName} (attempt $attempt): $e',
+            );
+            await Future.delayed(Duration(seconds: 1 << attempt));
           }
-        } catch (e) {
-          debugPrint('Error syncing proof ${proof.fileName}: $e');
         }
       }
     } catch (e) {
@@ -202,7 +258,7 @@ class SupabaseSyncService {
             shopperLng: (orderData['shopper_lng'] as num).toDouble(),
             status: orderData['status'] as String,
             itemsList: orderData['items_list'] as String,
-            shopperRating: orderData['shopper_rating'] as double?,
+            shopperRating: (orderData['shopper_rating'] as num?)?.toDouble(),
             disputeReason: orderData['dispute_reason'] as String?,
             createdAt: DateTime.parse(orderData['created_at'] as String),
             updatedAt: DateTime.parse(orderData['updated_at'] as String),
